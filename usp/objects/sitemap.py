@@ -4,6 +4,7 @@ import abc
 import os
 import pickle
 import tempfile
+from itertools import tee
 from typing import List, Iterator
 
 from .page import SitemapPage
@@ -28,7 +29,7 @@ class AbstractSitemap(object, metaclass=abc.ABCMeta):
 
     def __eq__(self, other) -> bool:
         if not isinstance(other, AbstractSitemap):
-            raise NotImplemented
+            raise NotImplementedError
 
         if self.url != other.url:
             return False
@@ -222,7 +223,7 @@ class AbstractIndexSitemap(AbstractSitemap):
         '__sub_sitemaps',
     ]
 
-    def __init__(self, url: str, sub_sitemaps: List[AbstractSitemap]):
+    def __init__(self, url: str, sub_sitemaps: Iterator[AbstractSitemap]):
         """
         Initialize index sitemap.
 
@@ -253,13 +254,14 @@ class AbstractIndexSitemap(AbstractSitemap):
         ).format(self=self)
 
     @property
-    def sub_sitemaps(self) -> List[AbstractSitemap]:
+    def sub_sitemaps(self) -> Iterator[AbstractSitemap]:
         """
         Return sub-sitemaps that are linked to from this sitemap.
 
         :return: Sub-sitemaps that are linked to from this sitemap.
         """
-        return self.__sub_sitemaps
+        self.__sub_sitemaps, sub_sitemaps_copy = tee(self.__sub_sitemaps, 2)
+        return sub_sitemaps_copy
 
     def all_pages(self) -> Iterator[SitemapPage]:
         """

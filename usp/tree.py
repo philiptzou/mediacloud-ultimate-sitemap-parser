@@ -1,6 +1,6 @@
 """Helpers to generate a sitemap tree."""
 
-from typing import Optional
+from typing import Optional, Iterator, Callable
 
 from .exceptions import SitemapException
 from .fetch_parse import SitemapFetcher
@@ -30,32 +30,24 @@ _UNPUBLISHED_SITEMAP_PATHS = {
 """Paths which are not exposed in robots.txt but might still contain a sitemap."""
 
 
-def sitemap_tree_for_homepage(homepage_url: str, web_client: Optional[AbstractWebClient] = None) -> AbstractSitemap:
+def _iter_sitemaps_for_homepage(
+    homepage_url: str,
+    web_client: Optional[AbstractWebClient] = None,
+    filter_sub_sitemap: Callable[[str, str], bool] = lambda url, lastmod: True
+) -> Iterator[AbstractSitemap]:
     """
-    Using a homepage URL, fetch the tree of sitemaps and pages listed in them.
+    Using a homepage URL, iterate sitemaps.
 
     :param homepage_url: Homepage URL of a website to fetch the sitemap tree for, e.g. "http://www.example.com/".
     :param web_client: Web client implementation to use for fetching sitemaps.
-    :return: Root sitemap object of the fetched sitemap tree.
+    :yield: sitemaps
     """
 
-    if not is_http_url(homepage_url):
-        raise SitemapException("URL {} is not a HTTP(s) URL.".format(homepage_url))
-
-    stripped_homepage_url = strip_url_to_homepage(url=homepage_url)
-    if homepage_url != stripped_homepage_url:
-        log.warning("Assuming that the homepage of {} is {}".format(homepage_url, stripped_homepage_url))
-        homepage_url = stripped_homepage_url
-
-    if not homepage_url.endswith('/'):
-        homepage_url += '/'
     robots_txt_url = homepage_url + 'robots.txt'
-
-    sitemaps = []
 
     robots_txt_fetcher = SitemapFetcher(url=robots_txt_url, web_client=web_client, recursion_level=0)
     robots_txt_sitemap = robots_txt_fetcher.sitemap()
-    sitemaps.append(robots_txt_sitemap)
+    yield robots_txt_sitemap
 
     sitemap_urls_found_in_robots_txt = set()
     if isinstance(robots_txt_sitemap, IndexRobotsTxtSitemap):
@@ -72,13 +64,39 @@ def sitemap_tree_for_homepage(homepage_url: str, web_client: Optional[AbstractWe
                 url=unpublished_sitemap_url,
                 web_client=web_client,
                 recursion_level=0,
+                filter_sub_sitemap=filter_sub_sitemap
             )
             unpublished_sitemap = unpublished_sitemap_fetcher.sitemap()
 
             # Skip the ones that weren't found
             if not isinstance(unpublished_sitemap, InvalidSitemap):
-                sitemaps.append(unpublished_sitemap)
+                yield unpublished_sitemap
 
+
+def sitemap_tree_for_homepage(
+    homepage_url: str,
+    web_client: Optional[AbstractWebClient] = None,
+    filter_sub_sitemap: Callable[[str, str], bool] = lambda url, lastmod: True
+) -> AbstractSitemap:
+    """
+    Using a homepage URL, fetch the tree of sitemaps and pages listed in them.
+
+    :param homepage_url: Homepage URL of a website to fetch the sitemap tree for, e.g. "http://www.example.com/".
+    :param web_client: Web client implementation to use for fetching sitemaps.
+    :return: Root sitemap object of the fetched sitemap tree.
+    """
+    if not is_http_url(homepage_url):
+        raise SitemapException("URL {} is not a HTTP(s) URL.".format(homepage_url))
+
+    stripped_homepage_url = strip_url_to_homepage(url=homepage_url)
+    if homepage_url != stripped_homepage_url:
+        log.warning("Assuming that the homepage of {} is {}".format(homepage_url, stripped_homepage_url))
+        homepage_url = stripped_homepage_url
+
+    if not homepage_url.endswith('/'):
+        homepage_url += '/'
+
+    sitemaps = _iter_sitemaps_for_homepage(homepage_url, web_client, filter_sub_sitemap)
     index_sitemap = IndexWebsiteSitemap(url=homepage_url, sub_sitemaps=sitemaps)
 
     return index_sitemap

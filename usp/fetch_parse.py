@@ -5,7 +5,7 @@ import re
 import xml.parsers.expat
 from collections import OrderedDict
 from decimal import Decimal
-from typing import Optional, Dict
+from typing import Optional, Dict, Iterator, Callable
 
 from .exceptions import SitemapException, SitemapXMLParsingException
 from .helpers import (
@@ -58,9 +58,15 @@ class SitemapFetcher(object):
         '_url',
         '_recursion_level',
         '_web_client',
+        '_filter_sub_sitemap',
     ]
 
-    def __init__(self, url: str, recursion_level: int, web_client: Optional[AbstractWebClient] = None):
+    def __init__(
+        self, url: str,
+        recursion_level: int,
+        web_client: Optional[AbstractWebClient] = None,
+        filter_sub_sitemap: Callable[[str, str], bool] = lambda url, lastmod: True
+    ):
 
         if recursion_level > self.__MAX_RECURSION_LEVEL:
             raise SitemapException("Recursion level exceeded {} for URL {}.".format(self.__MAX_RECURSION_LEVEL, url))
@@ -76,6 +82,7 @@ class SitemapFetcher(object):
         self._url = url
         self._web_client = web_client
         self._recursion_level = recursion_level
+        self._filter_sub_sitemap = filter_sub_sitemap
 
     def sitemap(self) -> AbstractSitemap:
         log.info("Fetching level {} sitemap from {}...".format(self._recursion_level, self._url))
@@ -99,6 +106,7 @@ class SitemapFetcher(object):
                 content=response_content,
                 recursion_level=self._recursion_level,
                 web_client=self._web_client,
+                filter_sub_sitemap=self._filter_sub_sitemap
             )
 
         else:
@@ -154,7 +162,7 @@ class IndexRobotsTxtSitemapParser(AbstractSitemapParser):
         if not self._url.endswith('/robots.txt'):
             raise SitemapException("URL does not look like robots.txt URL: {}".format(self._url))
 
-    def sitemap(self) -> AbstractSitemap:
+    def _iter_sub_sitemaps(self) -> Iterator[AbstractSitemap]:
 
         # Serves as an ordered set because we want to deduplicate URLs but also retain the order
         sitemap_urls = OrderedDict()
@@ -171,8 +179,6 @@ class IndexRobotsTxtSitemapParser(AbstractSitemapParser):
                 else:
                     log.warning("Sitemap URL {} doesn't look like an URL, skipping".format(sitemap_url))
 
-        sub_sitemaps = []
-
         for sitemap_url in sitemap_urls.keys():
             fetcher = SitemapFetcher(
                 url=sitemap_url,
@@ -180,7 +186,11 @@ class IndexRobotsTxtSitemapParser(AbstractSitemapParser):
                 web_client=self._web_client,
             )
             fetched_sitemap = fetcher.sitemap()
-            sub_sitemaps.append(fetched_sitemap)
+            yield fetched_sitemap
+
+    def sitemap(self) -> AbstractSitemap:
+
+        sub_sitemaps = self._iter_sub_sitemaps()
 
         index_sitemap = IndexRobotsTxtSitemap(url=self._url, sub_sitemaps=sub_sitemaps)
 
@@ -220,13 +230,22 @@ class XMLSitemapParser(AbstractSitemapParser):
 
     __slots__ = [
         '_concrete_parser',
+        '_filter_sub_sitemap',
     ]
 
-    def __init__(self, url: str, content: str, recursion_level: int, web_client: AbstractWebClient):
+    def __init__(
+        self,
+        url: str,
+        content: str,
+        recursion_level: int,
+        web_client: AbstractWebClient,
+        filter_sub_sitemap: Callable[[str, str], bool] = lambda url, lastmod: True
+    ):
         super().__init__(url=url, content=content, recursion_level=recursion_level, web_client=web_client)
 
         # Will be initialized when the type of sitemap is known
         self._concrete_parser = None
+        self._filter_sub_sitemap = filter_sub_sitemap
 
     def sitemap(self) -> AbstractSitemap:
 
@@ -311,6 +330,7 @@ class XMLSitemapParser(AbstractSitemapParser):
                     url=self._url,
                     web_client=self._web_client,
                     recursion_level=self._recursion_level,
+                    filter_sub_sitemap=self._filter_sub_sitemap,
                 )
 
             elif name == 'rss':
@@ -395,50 +415,84 @@ class IndexXMLSitemapParser(AbstractXMLSitemapParser):
     __slots__ = [
         '_web_client',
         '_recursion_level',
+        '_filter_sub_sitemap',
+        '_current_sitemap',
+        '_sub_sitemaps',
 
-        # List of sub-sitemap URLs found in this index sitemap
+        # Set of sub-sitemap URLs found in this index sitemap
         '_sub_sitemap_urls',
     ]
 
-    def __init__(self, url: str, web_client: AbstractWebClient, recursion_level: int):
+    def __init__(
+        self,
+        url: str,
+        web_client: AbstractWebClient,
+        recursion_level: int,
+        filter_sub_sitemap: Callable[[str, str], bool] = lambda url, lastmod: True
+    ):
         super().__init__(url=url)
 
         self._web_client = web_client
         self._recursion_level = recursion_level
-        self._sub_sitemap_urls = []
+        self._current_sitemap = {}
+        self._sub_sitemaps = []
+        self._sub_sitemap_urls = set()
+        self._filter_sub_sitemap = filter_sub_sitemap
+
+    def xml_element_start(self, name: str, attrs: Dict[str, str]) -> None:
+
+        super().xml_element_start(name=name, attrs=attrs)
+
+        if name == 'sitemap:sitemap':
+            if self._current_sitemap:
+                raise SitemapXMLParsingException("_current_sitemap is expected to be unset by </sitemap>.")
+            self._current_sitemap = {}
 
     def xml_element_end(self, name: str) -> None:
 
-        if name == 'sitemap:loc':
-            sub_sitemap_url = html_unescape_strip(self._last_char_data)
-            if not is_http_url(sub_sitemap_url):
-                log.warning("Sub-sitemap URL does not look like one: {}".format(sub_sitemap_url))
+        if name == 'sitemap:sitemap':
+            url = self._current_sitemap.get('url')
+            if url and url not in self._sub_sitemap_urls:
+                self._sub_sitemaps.append(self._current_sitemap)
+                self._sub_sitemap_urls.add(url)
+            self._current_sitemap = None
 
-            else:
-                if sub_sitemap_url not in self._sub_sitemap_urls:
-                    self._sub_sitemap_urls.append(sub_sitemap_url)
+        else:
+            if name == 'sitemap:loc':
+                sub_sitemap_url = html_unescape_strip(self._last_char_data)
+                if not is_http_url(sub_sitemap_url):
+                    log.warning("Sub-sitemap URL does not look like one: {}".format(sub_sitemap_url))
+
+                else:
+                    self._current_sitemap['url'] = sub_sitemap_url
+            elif name == 'sitemap:lastmod':
+                self._current_sitemap['lastmod'] = html_unescape_strip(self._last_char_data)
 
         super().xml_element_end(name=name)
 
-    def sitemap(self) -> AbstractSitemap:
+    def _iter_sub_sitemaps(self) -> Iterator[AbstractSitemap]:
 
-        sub_sitemaps = []
-
-        for sub_sitemap_url in self._sub_sitemap_urls:
+        for sub_sitemap in self._sub_sitemaps:
+            if not self._filter_sub_sitemap(sub_sitemap.get('url'), sub_sitemap.get('lastmod')):
+                continue
 
             # URL might be invalid, or recursion limit might have been reached
             try:
-                fetcher = SitemapFetcher(url=sub_sitemap_url,
+                fetcher = SitemapFetcher(url=sub_sitemap['url'],
                                          recursion_level=self._recursion_level + 1,
                                          web_client=self._web_client)
                 fetched_sitemap = fetcher.sitemap()
             except Exception as ex:
                 fetched_sitemap = InvalidSitemap(
-                    url=sub_sitemap_url,
-                    reason="Unable to add sub-sitemap from URL {}: {}".format(sub_sitemap_url, str(ex)),
+                    url=sub_sitemap['url'],
+                    reason="Unable to add sub-sitemap from URL {}: {}".format(sub_sitemap['url'], str(ex)),
                 )
 
-            sub_sitemaps.append(fetched_sitemap)
+            yield fetched_sitemap
+
+    def sitemap(self) -> AbstractSitemap:
+
+        sub_sitemaps = self._iter_sub_sitemaps()
 
         index_sitemap = IndexXMLSitemap(url=self._url, sub_sitemaps=sub_sitemaps)
 
@@ -593,7 +647,7 @@ class PagesXMLSitemapParser(AbstractXMLSitemapParser):
 
         if name == 'sitemap:url':
             if self._current_page:
-                raise SitemapXMLParsingException("Page is expected to be unset by <url>.")
+                raise SitemapXMLParsingException("Page is expected to be unset by </url>.")
             self._current_page = self.Page()
 
     def __require_last_char_data_to_be_set(self, name: str) -> None:
