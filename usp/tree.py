@@ -45,7 +45,12 @@ def _iter_sitemaps_for_homepage(
 
     robots_txt_url = homepage_url + 'robots.txt'
 
-    robots_txt_fetcher = SitemapFetcher(url=robots_txt_url, web_client=web_client, recursion_level=0)
+    robots_txt_fetcher = SitemapFetcher(
+        url=robots_txt_url,
+        web_client=web_client,
+        recursion_level=0,
+        filter_sub_sitemap=filter_sub_sitemap
+    )
     robots_txt_sitemap = robots_txt_fetcher.sitemap()
     yield robots_txt_sitemap
 

@@ -480,7 +480,8 @@ class IndexXMLSitemapParser(AbstractXMLSitemapParser):
             try:
                 fetcher = SitemapFetcher(url=sub_sitemap['url'],
                                          recursion_level=self._recursion_level + 1,
-                                         web_client=self._web_client)
+                                         web_client=self._web_client,
+                                         filter_sub_sitemap=self._filter_sub_sitemap)
                 fetched_sitemap = fetcher.sitemap()
             except Exception as ex:
                 fetched_sitemap = InvalidSitemap(
