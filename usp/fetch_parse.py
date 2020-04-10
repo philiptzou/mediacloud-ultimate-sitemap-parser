@@ -117,6 +117,7 @@ class SitemapFetcher(object):
                     content=response_content,
                     recursion_level=self._recursion_level,
                     web_client=self._web_client,
+                    filter_sub_sitemap=self._filter_sub_sitemap
                 )
             else:
                 parser = PlainTextSitemapParser(
@@ -156,11 +157,19 @@ class AbstractSitemapParser(object, metaclass=abc.ABCMeta):
 class IndexRobotsTxtSitemapParser(AbstractSitemapParser):
     """robots.txt index sitemap parser."""
 
-    def __init__(self, url: str, content: str, recursion_level: int, web_client: AbstractWebClient):
+    __slots__ = [
+        '_filter_sub_sitemap',
+    ]
+
+    def __init__(
+        self, url: str, content: str, recursion_level: int, web_client: AbstractWebClient,
+        filter_sub_sitemap: Callable[[str, str], bool] = lambda url, lastmod: True
+    ):
         super().__init__(url=url, content=content, recursion_level=recursion_level, web_client=web_client)
 
         if not self._url.endswith('/robots.txt'):
             raise SitemapException("URL does not look like robots.txt URL: {}".format(self._url))
+        self._filter_sub_sitemap = filter_sub_sitemap
 
     def _iter_sub_sitemaps(self) -> Iterator[AbstractSitemap]:
 
@@ -184,6 +193,7 @@ class IndexRobotsTxtSitemapParser(AbstractSitemapParser):
                 url=sitemap_url,
                 recursion_level=self._recursion_level,
                 web_client=self._web_client,
+                filter_sub_sitemap=self._filter_sub_sitemap
             )
             fetched_sitemap = fetcher.sitemap()
             yield fetched_sitemap
